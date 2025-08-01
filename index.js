@@ -5,11 +5,16 @@ const admin = require('firebase-admin');
 const app = express();
 app.use(bodyParser.json());
 
-const serviceAccount = require('./serviceAccountKey.json');
+// const serviceAccount = require('./serviceAccountKey.json');
+// admin.initializeApp({
+//   credential: admin.credential.cert(serviceAccount),
+//   databaseURL: "https://test-for-flutter-flow-default-rtdb.firebaseio.com"
+// });
+const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://test-for-flutter-flow-default-rtdb.firebaseio.com"
 });
+
 
 const db = admin.firestore();
 const rtdb = admin.database();
