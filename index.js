@@ -13,7 +13,9 @@ app.use(bodyParser.json());
 const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://test-for-flutter-flow.firebaseio.com"
 });
+
 
 
 const db = admin.firestore();
