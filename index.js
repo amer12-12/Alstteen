@@ -1,3 +1,4 @@
+// index.js
 const express = require('express');
 const bodyParser = require('body-parser');
 const admin = require('firebase-admin');
@@ -15,7 +16,8 @@ admin.initializeApp({
 const db = admin.firestore();
 const rtdb = admin.database();
 
-// --- helpers ---
+/* ===================== helpers ===================== */
+
 function evaluateCondition(value, operator, target) {
   switch (operator) {
     case '==': return value == target;
@@ -28,20 +30,49 @@ function evaluateCondition(value, operator, target) {
   }
 }
 
-async function sendToTokens(tokens, title, body) {
-  for (const token of tokens) {
-    try {
-      await admin.messaging().send({
-        token,
-        notification: { title, body },
-      });
-      console.log(`✅ إشعار أُرسل إلى: ${token}`);
-    } catch (err) {
-      console.error(`❌ فشل إرسال الإشعار إلى ${token}: ${err.message}`);
-    }
-  }
+// تقسيم مصفوفة إلى دفعات بحجم ثابت (للإرسال المتعدد)
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
+// إرسال إشعار إلى مجموعة توكنات (يدعم دفعات 500)
+async function sendToTokens(tokens, title, body) {
+  // تنظيف وتفريد
+  const clean = [...new Set(tokens.filter(t => typeof t === 'string' && t.trim().length > 0))];
+  if (clean.length === 0) {
+    console.warn('⚠️ لا توجد توكينات صالحة بعد التنظيف.');
+    return;
+  }
+
+  const batches = chunk(clean, 500); // حد FCM
+  let sent = 0, failed = 0;
+
+  for (const tokensBatch of batches) {
+    try {
+      const res = await admin.messaging().sendEachForMulticast({
+        tokens: tokensBatch,
+        notification: { title, body },
+      });
+      sent  += res.successCount;
+      failed += res.failureCount;
+
+      // سجل الأخطاء المفيدة (مثلاً invalid-registration-token) — يمكن لاحقًا حذف التوكنات المعطوبة
+      res.responses.forEach((r, idx) => {
+        if (!r.success) {
+          console.error(`❌ فشل إرسال إلى ${tokensBatch[idx]}: ${r.error?.code} | ${r.error?.message}`);
+        }
+      });
+    } catch (err) {
+      console.error('❌ خطأ أثناء sendEachForMulticast:', err.message);
+    }
+  }
+
+  console.log(`📨 تم الإرسال: ${sent} ✔️ / فشل: ${failed} ✖️ (إجمالي مستهدف: ${clean.length})`);
+}
+
+// جلب توكنات مستخدم محدد بالـ uid أو email
 async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
   try {
     let userDocSnap = null;
@@ -63,11 +94,11 @@ async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
       }
       userDocSnap = q.docs[0];
     } else {
-      console.warn('⚠️ لا يوجد target_uid أو target_email في المهمة.');
+      // لا هدف — سيُستخدم برودكاست لاحقًا
       return [];
     }
 
-    const tokens = userDocSnap.data().device_tokens || [];
+    const tokens = userDocSnap.data()?.device_tokens || [];
     if (!Array.isArray(tokens) || tokens.length === 0) {
       console.warn('⚠️ لا توجد device_tokens للمستخدم.');
       return [];
@@ -79,7 +110,26 @@ async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
   }
 }
 
-// --- main watcher ---
+// جلب كل التوكنات من جميع المستخدمين (برودكاست)
+async function getAllDeviceTokens() {
+  try {
+    const snap = await db.collection('users').get();
+    if (snap.empty) return [];
+
+    const all = [];
+    snap.forEach(doc => {
+      const arr = doc.data()?.device_tokens;
+      if (Array.isArray(arr)) all.push(...arr);
+    });
+    return all;
+  } catch (e) {
+    console.error('❌ خطأ في جلب كل device_tokens:', e.message);
+    return [];
+  }
+}
+
+/* ===================== main watcher ===================== */
+
 async function setupAutomationListeners() {
   const snapshot = await db.collection('automations').get();
   if (snapshot.empty) {
@@ -90,7 +140,6 @@ async function setupAutomationListeners() {
   snapshot.forEach(doc => {
     const data = doc.data();
 
-    // نقرأ الحقول حسب هيكل الصورة
     const actionType   = data?.action?.type;
     const title        = data?.action?.payload?.title || 'Notification';
     const text         = data?.action?.payload?.text  || '';
@@ -100,11 +149,9 @@ async function setupAutomationListeners() {
     const source       = data?.condition?.source;  // يجب أن يكون "firebase_rtdb"
     const targetValue  = data?.condition?.value;
 
-    // اختيار المُستهدف
     const targetUid    = data?.target_uid || null;
     const targetEmail  = data?.target_email || null;
 
-    // تحقق من صحة البيانات
     if (actionType !== 'notification') {
       console.log(`↩️ المهمة ${doc.id}: action.type ليس "notification" — تم التخطي.`);
       return;
@@ -125,16 +172,24 @@ async function setupAutomationListeners() {
       if (evaluateCondition(current, operator, targetValue)) {
         console.log(`🚨 تحقّق الشرط للمهمة ${doc.id} على ${rtdbPath}:`, current);
 
-        const tokens = await getUserDeviceTokensByTarget({
-          targetUid,
-          targetEmail,
-        });
-
-        if (tokens.length > 0) {
-          await sendToTokens(tokens, title, text);
+        // إن لم يوجد هدف محدد ⇒ برودكاست
+        let tokens = [];
+        if (targetUid || targetEmail) {
+          tokens = await getUserDeviceTokensByTarget({ targetUid, targetEmail });
+          if (tokens.length === 0) {
+            console.warn('⚠️ لا توجد توكينات للمستخدم الهدف — لن يتم الإرسال.');
+            return;
+          }
         } else {
-          console.warn('⚠️ لا توجد توكينات لإرسال الإشعار.');
+          console.warn('ℹ️ لا يوجد target_uid/target_email — سيتم الإرسال كبرودكاست لجميع المستخدمين.');
+          tokens = await getAllDeviceTokens();
+          if (tokens.length === 0) {
+            console.warn('⚠️ لا توجد توكينات لدى أي مستخدم — لن يتم الإرسال.');
+            return;
+          }
         }
+
+        await sendToTokens(tokens, title, text);
       }
     });
 
@@ -142,7 +197,8 @@ async function setupAutomationListeners() {
   });
 }
 
-// --- health/test endpoints ---
+/* ===================== health/test endpoints ===================== */
+
 app.get('/check-firestore', async (_req, res) => {
   try {
     const snapshot = await db.collection('automations').get();
@@ -162,7 +218,8 @@ app.get('/check-rtdb', async (_req, res) => {
   }
 });
 
-// --- start server ---
+/* ===================== start server ===================== */
+
 app.listen(3000, () => {
   console.log('✅ Server running at http://localhost:3000');
   setupAutomationListeners().catch(err =>
