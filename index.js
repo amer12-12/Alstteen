@@ -101,46 +101,55 @@ function startAutomation(docId, data) {
   const text         = data?.action?.payload?.text  || '';
 
   const operator     = data?.condition?.operator;
-  const rtdbPath     = data?.condition?.path;     // مثال: "Amr/Hum" أو "Nomber"
-  const source       = data?.condition?.source;   // يجب أن يكون "firebase_rtdb"
+  const rtdbPath     = data?.condition?.path;
+  const source       = data?.condition?.source;
   const targetValue  = data?.condition?.value;
 
   const targetUid    = data?.target_uid || null;
   const targetEmail  = data?.target_email || null;
 
-  // تحققات سريعة
-  if (actionType !== 'notification') {
-    console.log(`↩️ ${docId}: action.type ليس "notification" — تخطّي`);
-    return;
-  }
-  if (source !== 'firebase_rtdb') {
-    console.log(`↩️ ${docId}: source ليس "firebase_rtdb" — تخطّي`);
-    return;
-  }
-  if (!rtdbPath || !operator || typeof targetValue === 'undefined') {
-    console.log(`↩️ ${docId}: حقول condition ناقصة — تخطّي`);
+  const repeatUnit   = data?.repeat_unit || null;   // seconds, minutes, hours
+  const repeatValue  = data?.repeat_value || null;  // رقم التكرار
+
+  if (actionType !== 'notification' || source !== 'firebase_rtdb' || !rtdbPath || !operator || typeof targetValue === 'undefined') {
+    console.log(`↩️ ${docId}: بيانات غير مكتملة أو النوع غير مدعوم`);
     return;
   }
 
-  // لا تكرر تشغيل نفس الأتمتة
   if (automationWatchers.has(docId)) {
     stopAutomation(docId);
   }
 
+  let lastTriggered = 0; // حفظ آخر مرة أرسل فيها الإشعار
+
   const ref = rtdb.ref(rtdbPath);
   const callback = async (snap) => {
     const current = snap.val();
+    const now = Date.now();
+
+    let intervalMs = 0;
+    if (repeatUnit && repeatValue) {
+      if (repeatUnit === "seconds") intervalMs = repeatValue * 1000;
+      if (repeatUnit === "minutes") intervalMs = repeatValue * 60 * 1000;
+      if (repeatUnit === "hours")   intervalMs = repeatValue * 60 * 60 * 1000;
+    }
+
     if (evaluateCondition(current, operator, targetValue)) {
-      console.log(`🚨 تحقّق الشرط للمهمة ${docId} على ${rtdbPath}:`, current);
-      const tokens = await getUserDeviceTokensByTarget({ targetUid, targetEmail });
-      if (tokens.length > 0) {
-        await sendToTokens(tokens, title, text);
+      if (!intervalMs || now - lastTriggered >= intervalMs) {
+        console.log(`🚨 تحقّق الشرط للمهمة ${docId}:`, current);
+        const tokens = await getUserDeviceTokensByTarget({ targetUid, targetEmail });
+        if (tokens.length > 0) {
+          await sendToTokens(tokens, title, text);
+          lastTriggered = now;
+        } else {
+          console.warn(`⚠️ ${docId}: لا توجد device_tokens للمستخدم المستهدف.`);
+        }
       } else {
-        console.warn(`⚠️ ${docId}: لا توجد device_tokens للمستخدم المستهدف.`);
+        console.log(`⏳ ${docId}: تم التفعيل لكن لم يمر الوقت الكافي للتكرار`);
       }
     }
   };
-
+  
   ref.on('value', callback);
   automationWatchers.set(docId, { rtdbRef: ref, callback });
   console.log(`📡 بدأنا نراقب "${rtdbPath}" للمهمة ${docId}`);
