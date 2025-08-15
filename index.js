@@ -6,18 +6,18 @@ const admin = require('firebase-admin');
 const app = express();
 app.use(bodyParser.json());
 
-// -------- Firebase Admin init (من متغير البيئة) --------
+// ---------- Firebase Admin init ----------
 const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  // عدّل الـ URL لو مختلف عندك
+  // غيّر الرابط لو قاعدة RTDB عندك مختلفة
   databaseURL: 'https://test-for-flutter-flow-default-rtdb.firebaseio.com',
 });
 
 const db = admin.firestore();
 const rtdb = admin.database();
 
-// -------- Helpers --------
+// ---------- Helpers ----------
 function evaluateCondition(value, operator, target) {
   switch (operator) {
     case '==': return value == target;
@@ -81,8 +81,12 @@ async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
   }
 }
 
-// -------- إدارة الليسنرز لكل Automation --------
-const automationWatchers = new Map(); // Map(docId -> { rtdbRef, callback })
+// ---------- إدارة الليسنرز لكل Automation ----------
+/**
+ * automationWatchers:
+ * Map(docId -> { rtdbRef, callback, lastTriggered })
+ */
+const automationWatchers = new Map();
 
 function stopAutomation(docId) {
   const watcher = automationWatchers.get(docId);
@@ -95,48 +99,68 @@ function stopAutomation(docId) {
   }
 }
 
+function msFromRepeat(repeatUnit, repeatValue) {
+  if (!repeatUnit || !repeatValue) return 0;
+  const n = Number(repeatValue);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+
+  switch (repeatUnit) {
+    case 'seconds': return n * 1000;
+    case 'minutes': return n * 60 * 1000;
+    case 'hours':   return n * 60 * 60 * 1000;
+    default:        return 0;
+  }
+}
+
 function startAutomation(docId, data) {
   const actionType   = data?.action?.type;
   const title        = data?.action?.payload?.title || 'Notification';
   const text         = data?.action?.payload?.text  || '';
 
   const operator     = data?.condition?.operator;
-  const rtdbPath     = data?.condition?.path;
-  const source       = data?.condition?.source;
+  const rtdbPath     = data?.condition?.path;     // مثال: "Amr/Hum" أو "Nomber"
+  const source       = data?.condition?.source;   // يجب أن يكون "firebase_rtdb"
   const targetValue  = data?.condition?.value;
 
   const targetUid    = data?.target_uid || null;
   const targetEmail  = data?.target_email || null;
 
-  const repeatUnit   = data?.repeat_unit || null;   // seconds, minutes, hours
+  // حقلَي التكرار (اختياريين)
+  const repeatUnit   = data?.repeat_unit || null;   // 'seconds' | 'minutes' | 'hours'
   const repeatValue  = data?.repeat_value || null;  // رقم التكرار
+  const intervalMs   = msFromRepeat(repeatUnit, repeatValue);
 
-  if (actionType !== 'notification' || source !== 'firebase_rtdb' || !rtdbPath || !operator || typeof targetValue === 'undefined') {
-    console.log(`↩️ ${docId}: بيانات غير مكتملة أو النوع غير مدعوم`);
+  // تحققات سريعة
+  if (actionType !== 'notification') {
+    console.log(`↩️ ${docId}: action.type ليس "notification" — تخطّي`);
+    return;
+  }
+  if (source !== 'firebase_rtdb') {
+    console.log(`↩️ ${docId}: source ليس "firebase_rtdb" — تخطّي`);
+    return;
+  }
+  if (!rtdbPath || !operator || typeof targetValue === 'undefined') {
+    console.log(`↩️ ${docId}: حقول condition ناقصة — تخطّي`);
     return;
   }
 
+  // لا تكرر تشغيل نفس الأتمتة
   if (automationWatchers.has(docId)) {
     stopAutomation(docId);
   }
 
-  let lastTriggered = 0; // حفظ آخر مرة أرسل فيها الإشعار
+  let lastTriggered = 0; // آخر مرة أرسل فيها إشعار لهذه الأتمتة
 
   const ref = rtdb.ref(rtdbPath);
   const callback = async (snap) => {
     const current = snap.val();
     const now = Date.now();
 
-    let intervalMs = 0;
-    if (repeatUnit && repeatValue) {
-      if (repeatUnit === "seconds") intervalMs = repeatValue * 1000;
-      if (repeatUnit === "minutes") intervalMs = repeatValue * 60 * 1000;
-      if (repeatUnit === "hours")   intervalMs = repeatValue * 60 * 60 * 1000;
-    }
-
     if (evaluateCondition(current, operator, targetValue)) {
+      // لو ما فيه تكرار محدد → أرسل كل مرة يتحقق الشرط
+      // لو فيه تكرار → لا ترسل إلا بعد مرور الفترة
       if (!intervalMs || now - lastTriggered >= intervalMs) {
-        console.log(`🚨 تحقّق الشرط للمهمة ${docId}:`, current);
+        console.log(`🚨 تحقّق الشرط للمهمة ${docId} على ${rtdbPath}:`, current);
         const tokens = await getUserDeviceTokensByTarget({ targetUid, targetEmail });
         if (tokens.length > 0) {
           await sendToTokens(tokens, title, text);
@@ -145,14 +169,14 @@ function startAutomation(docId, data) {
           console.warn(`⚠️ ${docId}: لا توجد device_tokens للمستخدم المستهدف.`);
         }
       } else {
-        console.log(`⏳ ${docId}: تم التفعيل لكن لم يمر الوقت الكافي للتكرار`);
+        console.log(`⏳ ${docId}: الشرط تحقق لكن لم يمر وقت التكرار بعد (${repeatValue} ${repeatUnit}).`);
       }
     }
   };
-  
+
   ref.on('value', callback);
-  automationWatchers.set(docId, { rtdbRef: ref, callback });
-  console.log(`📡 بدأنا نراقب "${rtdbPath}" للمهمة ${docId}`);
+  automationWatchers.set(docId, { rtdbRef: ref, callback, lastTriggered });
+  console.log(`📡 بدأنا نراقب "${rtdbPath}" للمهمة ${docId}${intervalMs ? ` — تكرار كل ${repeatValue} ${repeatUnit}` : ''}`);
 }
 
 function setupAutomationListeners() {
@@ -179,7 +203,7 @@ function setupAutomationListeners() {
   );
 }
 
-// -------- Health/Test endpoints --------
+// ---------- Health/Test endpoints ----------
 app.get('/check-firestore', async (_req, res) => {
   try {
     const snapshot = await db.collection('automations').get();
@@ -199,7 +223,7 @@ app.get('/check-rtdb', async (_req, res) => {
   }
 });
 
-// تنظيف جيّد عند الإيقاف
+// ---------- Graceful shutdown ----------
 process.on('SIGTERM', () => {
   console.log('♻️ Shutting down… إيقاف جميع الليسنرز');
   for (const docId of automationWatchers.keys()) {
@@ -208,7 +232,7 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-// -------- Start server --------
+// ---------- Start server ----------
 app.listen(3000, () => {
   console.log('✅ Server running at http://localhost:3000');
   setupAutomationListeners();
