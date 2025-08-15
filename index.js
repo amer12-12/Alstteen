@@ -6,18 +6,18 @@ const admin = require('firebase-admin');
 const app = express();
 app.use(bodyParser.json());
 
-// --- Firebase Admin init ---
+// -------- Firebase Admin init (من متغير البيئة) --------
 const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
+  // عدّل الـ URL لو مختلف عندك
   databaseURL: 'https://test-for-flutter-flow-default-rtdb.firebaseio.com',
 });
 
 const db = admin.firestore();
 const rtdb = admin.database();
 
-/* ===================== helpers ===================== */
-
+// -------- Helpers --------
 function evaluateCondition(value, operator, target) {
   switch (operator) {
     case '==': return value == target;
@@ -30,49 +30,20 @@ function evaluateCondition(value, operator, target) {
   }
 }
 
-// تقسيم مصفوفة إلى دفعات بحجم ثابت (للإرسال المتعدد)
-function chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-// إرسال إشعار إلى مجموعة توكنات (يدعم دفعات 500)
 async function sendToTokens(tokens, title, body) {
-  // تنظيف وتفريد
-  const clean = [...new Set(tokens.filter(t => typeof t === 'string' && t.trim().length > 0))];
-  if (clean.length === 0) {
-    console.warn('⚠️ لا توجد توكينات صالحة بعد التنظيف.');
-    return;
-  }
-
-  const batches = chunk(clean, 500); // حد FCM
-  let sent = 0, failed = 0;
-
-  for (const tokensBatch of batches) {
+  for (const token of tokens) {
     try {
-      const res = await admin.messaging().sendEachForMulticast({
-        tokens: tokensBatch,
+      await admin.messaging().send({
+        token,
         notification: { title, body },
       });
-      sent  += res.successCount;
-      failed += res.failureCount;
-
-      // سجل الأخطاء المفيدة (مثلاً invalid-registration-token) — يمكن لاحقًا حذف التوكنات المعطوبة
-      res.responses.forEach((r, idx) => {
-        if (!r.success) {
-          console.error(`❌ فشل إرسال إلى ${tokensBatch[idx]}: ${r.error?.code} | ${r.error?.message}`);
-        }
-      });
+      console.log(`✅ إشعار أُرسل إلى: ${token}`);
     } catch (err) {
-      console.error('❌ خطأ أثناء sendEachForMulticast:', err.message);
+      console.error(`❌ فشل إرسال الإشعار إلى ${token}: ${err.message}`);
     }
   }
-
-  console.log(`📨 تم الإرسال: ${sent} ✔️ / فشل: ${failed} ✖️ (إجمالي مستهدف: ${clean.length})`);
 }
 
-// جلب توكنات مستخدم محدد بالـ uid أو email
 async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
   try {
     let userDocSnap = null;
@@ -94,11 +65,11 @@ async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
       }
       userDocSnap = q.docs[0];
     } else {
-      // لا هدف — سيُستخدم برودكاست لاحقًا
+      console.warn('⚠️ لا يوجد target_uid أو target_email في المهمة.');
       return [];
     }
 
-    const tokens = userDocSnap.data()?.device_tokens || [];
+    const tokens = userDocSnap.data().device_tokens || [];
     if (!Array.isArray(tokens) || tokens.length === 0) {
       console.warn('⚠️ لا توجد device_tokens للمستخدم.');
       return [];
@@ -110,95 +81,96 @@ async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
   }
 }
 
-// جلب كل التوكنات من جميع المستخدمين (برودكاست)
-async function getAllDeviceTokens() {
-  try {
-    const snap = await db.collection('users').get();
-    if (snap.empty) return [];
+// -------- إدارة الليسنرز لكل Automation --------
+const automationWatchers = new Map(); // Map(docId -> { rtdbRef, callback })
 
-    const all = [];
-    snap.forEach(doc => {
-      const arr = doc.data()?.device_tokens;
-      if (Array.isArray(arr)) all.push(...arr);
-    });
-    return all;
-  } catch (e) {
-    console.error('❌ خطأ في جلب كل device_tokens:', e.message);
-    return [];
+function stopAutomation(docId) {
+  const watcher = automationWatchers.get(docId);
+  if (!watcher) return;
+  try {
+    watcher.rtdbRef.off('value', watcher.callback);
+    console.log(`🛑 تم إيقاف مراقبة المهمة ${docId}`);
+  } finally {
+    automationWatchers.delete(docId);
   }
 }
 
-/* ===================== main watcher ===================== */
+function startAutomation(docId, data) {
+  const actionType   = data?.action?.type;
+  const title        = data?.action?.payload?.title || 'Notification';
+  const text         = data?.action?.payload?.text  || '';
 
-async function setupAutomationListeners() {
-  const snapshot = await db.collection('automations').get();
-  if (snapshot.empty) {
-    console.log('ℹ️ لا توجد مهام automations.');
+  const operator     = data?.condition?.operator;
+  const rtdbPath     = data?.condition?.path;     // مثال: "Amr/Hum" أو "Nomber"
+  const source       = data?.condition?.source;   // يجب أن يكون "firebase_rtdb"
+  const targetValue  = data?.condition?.value;
+
+  const targetUid    = data?.target_uid || null;
+  const targetEmail  = data?.target_email || null;
+
+  // تحققات سريعة
+  if (actionType !== 'notification') {
+    console.log(`↩️ ${docId}: action.type ليس "notification" — تخطّي`);
+    return;
+  }
+  if (source !== 'firebase_rtdb') {
+    console.log(`↩️ ${docId}: source ليس "firebase_rtdb" — تخطّي`);
+    return;
+  }
+  if (!rtdbPath || !operator || typeof targetValue === 'undefined') {
+    console.log(`↩️ ${docId}: حقول condition ناقصة — تخطّي`);
     return;
   }
 
-  snapshot.forEach(doc => {
-    const data = doc.data();
+  // لا تكرر تشغيل نفس الأتمتة
+  if (automationWatchers.has(docId)) {
+    stopAutomation(docId);
+  }
 
-    const actionType   = data?.action?.type;
-    const title        = data?.action?.payload?.title || 'Notification';
-    const text         = data?.action?.payload?.text  || '';
-
-    const operator     = data?.condition?.operator;
-    const rtdbPath     = data?.condition?.path;    // مثال: "Nomber" أو "Amr/Hum"
-    const source       = data?.condition?.source;  // يجب أن يكون "firebase_rtdb"
-    const targetValue  = data?.condition?.value;
-
-    const targetUid    = data?.target_uid || null;
-    const targetEmail  = data?.target_email || null;
-
-    if (actionType !== 'notification') {
-      console.log(`↩️ المهمة ${doc.id}: action.type ليس "notification" — تم التخطي.`);
-      return;
-    }
-    if (source !== 'firebase_rtdb') {
-      console.log(`↩️ المهمة ${doc.id}: source ليس "firebase_rtdb" — تم التخطي.`);
-      return;
-    }
-    if (!rtdbPath || !operator || typeof targetValue === 'undefined') {
-      console.log(`↩️ المهمة ${doc.id}: حقول condition ناقصة — تم التخطي.`);
-      return;
-    }
-
-    const ref = rtdb.ref(rtdbPath);
-    ref.on('value', async snap => {
-      const current = snap.val();
-
-      if (evaluateCondition(current, operator, targetValue)) {
-        console.log(`🚨 تحقّق الشرط للمهمة ${doc.id} على ${rtdbPath}:`, current);
-
-        // إن لم يوجد هدف محدد ⇒ برودكاست
-        let tokens = [];
-        if (targetUid || targetEmail) {
-          tokens = await getUserDeviceTokensByTarget({ targetUid, targetEmail });
-          if (tokens.length === 0) {
-            console.warn('⚠️ لا توجد توكينات للمستخدم الهدف — لن يتم الإرسال.');
-            return;
-          }
-        } else {
-          console.warn('ℹ️ لا يوجد target_uid/target_email — سيتم الإرسال كبرودكاست لجميع المستخدمين.');
-          tokens = await getAllDeviceTokens();
-          if (tokens.length === 0) {
-            console.warn('⚠️ لا توجد توكينات لدى أي مستخدم — لن يتم الإرسال.');
-            return;
-          }
-        }
-
+  const ref = rtdb.ref(rtdbPath);
+  const callback = async (snap) => {
+    const current = snap.val();
+    if (evaluateCondition(current, operator, targetValue)) {
+      console.log(`🚨 تحقّق الشرط للمهمة ${docId} على ${rtdbPath}:`, current);
+      const tokens = await getUserDeviceTokensByTarget({ targetUid, targetEmail });
+      if (tokens.length > 0) {
         await sendToTokens(tokens, title, text);
+      } else {
+        console.warn(`⚠️ ${docId}: لا توجد device_tokens للمستخدم المستهدف.`);
       }
-    });
+    }
+  };
 
-    console.log(`📡 بدأنا نراقب "${rtdbPath}" للمهمة ${doc.id}`);
-  });
+  ref.on('value', callback);
+  automationWatchers.set(docId, { rtdbRef: ref, callback });
+  console.log(`📡 بدأنا نراقب "${rtdbPath}" للمهمة ${docId}`);
 }
 
-/* ===================== health/test endpoints ===================== */
+function setupAutomationListeners() {
+  console.log('👂 نتابع مجموعة automations بالتحديث الفوري...');
+  return db.collection('automations').onSnapshot(
+    (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        const docId = change.doc.id;
+        const data  = change.doc.data();
 
+        if (change.type === 'added') {
+          startAutomation(docId, data);
+        } else if (change.type === 'modified') {
+          console.log(`✏️ تم تعديل الأتمتة ${docId} — إعادة تشغيل الليسنر`);
+          startAutomation(docId, data); // سيوقف القديم إن وجد ثم يشغّل الجديد
+        } else if (change.type === 'removed') {
+          stopAutomation(docId);
+        }
+      });
+    },
+    (err) => {
+      console.error('❌ Firestore onSnapshot error:', err.message);
+    }
+  );
+}
+
+// -------- Health/Test endpoints --------
 app.get('/check-firestore', async (_req, res) => {
   try {
     const snapshot = await db.collection('automations').get();
@@ -218,11 +190,17 @@ app.get('/check-rtdb', async (_req, res) => {
   }
 });
 
-/* ===================== start server ===================== */
+// تنظيف جيّد عند الإيقاف
+process.on('SIGTERM', () => {
+  console.log('♻️ Shutting down… إيقاف جميع الليسنرز');
+  for (const docId of automationWatchers.keys()) {
+    stopAutomation(docId);
+  }
+  process.exit(0);
+});
 
+// -------- Start server --------
 app.listen(3000, () => {
   console.log('✅ Server running at http://localhost:3000');
-  setupAutomationListeners().catch(err =>
-    console.error('❌ setupAutomationListeners error:', err)
-  );
+  setupAutomationListeners();
 });
