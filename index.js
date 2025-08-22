@@ -126,9 +126,10 @@ function startAutomation(docId, data) {
   const targetEmail  = data?.target_email || null;
 
   // حقلَي التكرار (اختياريين)
-  const repeatUnit   = data?.repeat_unit || null;   // 'seconds' | 'minutes' | 'hours'
-  const repeatValue  = data?.repeat_value || null;  // رقم التكرار
-  const intervalMs   = msFromRepeat(repeatUnit, repeatValue);
+ // قراءة بيانات التكرار من داخل كائن schedule
+ const repeatUnit   = data?.schedule?.unit || null;
+ const repeatValue  = data?.schedule?.interval || null;
+ const intervalMs   = msFromRepeat(repeatUnit, repeatValue);
 
   // تحققات سريعة
   if (actionType !== 'notification') {
