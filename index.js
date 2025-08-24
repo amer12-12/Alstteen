@@ -22,8 +22,8 @@ function evaluateCondition(value, operator, target) {
   switch (operator) {
     case '==': return value == target;
     case '!=': return value != target;
-    case '>':  return value >  target;
-    case '<':  return value <  target;
+    case '>':  return value > target;
+    case '<':  return value < target;
     case '>=': return value >= target;
     case '<=': return value <= target;
     default:   return false;
@@ -82,10 +82,6 @@ async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
 }
 
 // ---------- إدارة الليسنرز لكل Automation ----------
-/**
- * automationWatchers:
- * Map(docId -> { type, rtdbRef?, callback?, intervalId? })
- */
 const automationWatchers = new Map();
 
 function msFromRepeat(repeatUnit, repeatValue) {
@@ -106,7 +102,6 @@ function stopAutomation(docId) {
   if (!watcher) return;
 
   try {
-    // تحقق من نوع المراقب لإيقافه بالطريقة الصحيحة
     if (watcher.type === 'interval') {
       clearInterval(watcher.intervalId);
       console.log(`🛑 [Interval-Based] تم إيقاف الفحص الدوري للمهمة ${docId}`);
@@ -129,33 +124,20 @@ function startAutomation(docId, data) {
   const targetValue  = data?.condition?.value;
   const targetUid    = data?.target_uid || null;
   const targetEmail  = data?.target_email || null;
-<<<<<<< HEAD
-  
-  // -- تعديل مهم هنا --
+
   const repeatUnit   = data?.schedule?.unit || null;
   const repeatValue  = data?.schedule?.interval || null;
   const intervalMs   = msFromRepeat(repeatUnit, repeatValue);
-=======
 
-  // حقلَي التكرار (اختياريين)
- // قراءة بيانات التكرار من داخل كائن schedule
- const repeatUnit   = data?.schedule?.unit || null;
- const repeatValue  = data?.schedule?.interval || null;
- const intervalMs   = msFromRepeat(repeatUnit, repeatValue);
->>>>>>> 689fc1ce3a617e9fcc6f43fdeedd01946d462190
-
-  // تحققات سريعة
   if (actionType !== 'notification' || source !== 'firebase_rtdb' || !rtdbPath || !operator || typeof targetValue === 'undefined') {
     console.log(`↩️ ${docId}: بيانات الأتمتة ناقصة — تخطّي`);
     return;
   }
-  
-  // لا تكرر تشغيل نفس الأتمتة
+
   if (automationWatchers.has(docId)) {
     stopAutomation(docId);
   }
 
-  // إذا لم يكن هناك تكرار، استخدم المنطق القديم (المراقبة عند التغيير فقط)
   if (!intervalMs) {
     console.log(`📡 [Event-Based] بدأنا نراقب "${rtdbPath}" للمهمة ${docId}`);
     const ref = rtdb.ref(rtdbPath);
@@ -170,12 +152,10 @@ function startAutomation(docId, data) {
       }
     };
     ref.on('value', callback);
-    // خزّن المعلومات اللازمة للإيقاف لاحقًا
     automationWatchers.set(docId, { type: 'listener', rtdbRef: ref, callback });
     return;
   }
 
-  // المنطق الجديد: إذا كان هناك تكرار، استخدم الفحص الدوري
   console.log(`⏳ [Interval-Based] سنقوم بفحص "${rtdbPath}" كل ${repeatValue} ${repeatUnit} للمهمة ${docId}`);
 
   const intervalId = setInterval(async () => {
@@ -198,10 +178,8 @@ function startAutomation(docId, data) {
     }
   }, intervalMs);
 
-  // خزّن معرّف الـ interval لإيقافه لاحقًا
   automationWatchers.set(docId, { type: 'interval', intervalId });
 }
-
 
 function setupAutomationListeners() {
   console.log('👂 نتابع مجموعة automations بالتحديث الفوري...');
@@ -215,7 +193,7 @@ function setupAutomationListeners() {
           startAutomation(docId, data);
         } else if (change.type === 'modified') {
           console.log(`✏️ تم تعديل الأتمتة ${docId} — إعادة تشغيل الليسنر`);
-          startAutomation(docId, data); // سيوقف القديم إن وجد ثم يشغّل الجديد
+          startAutomation(docId, data);
         } else if (change.type === 'removed') {
           stopAutomation(docId);
         }
@@ -257,7 +235,8 @@ process.on('SIGTERM', () => {
 });
 
 // ---------- Start server ----------
-app.listen(3000, () => {
-  console.log('✅ Server running at http://localhost:3000');
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`✅ Server running at http://localhost:${PORT}`);
   setupAutomationListeners();
 });
