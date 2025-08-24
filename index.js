@@ -1,4 +1,5 @@
 // index.js
+
 const express = require('express');
 const bodyParser = require('body-parser');
 const admin = require('firebase-admin');
@@ -10,7 +11,6 @@ app.use(bodyParser.json());
 const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  // غيّر الرابط لو قاعدة RTDB عندك مختلفة
   databaseURL: 'https://test-for-flutter-flow-default-rtdb.firebaseio.com',
 });
 
@@ -84,20 +84,9 @@ async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
 // ---------- إدارة الليسنرز لكل Automation ----------
 /**
  * automationWatchers:
- * Map(docId -> { rtdbRef, callback, lastTriggered })
+ * Map(docId -> { type, rtdbRef?, callback?, intervalId? })
  */
 const automationWatchers = new Map();
-
-function stopAutomation(docId) {
-  const watcher = automationWatchers.get(docId);
-  if (!watcher) return;
-  try {
-    watcher.rtdbRef.off('value', watcher.callback);
-    console.log(`🛑 تم إيقاف مراقبة المهمة ${docId}`);
-  } finally {
-    automationWatchers.delete(docId);
-  }
-}
 
 function msFromRepeat(repeatUnit, repeatValue) {
   if (!repeatUnit || !repeatValue) return 0;
@@ -112,72 +101,98 @@ function msFromRepeat(repeatUnit, repeatValue) {
   }
 }
 
+function stopAutomation(docId) {
+  const watcher = automationWatchers.get(docId);
+  if (!watcher) return;
+
+  try {
+    // تحقق من نوع المراقب لإيقافه بالطريقة الصحيحة
+    if (watcher.type === 'interval') {
+      clearInterval(watcher.intervalId);
+      console.log(`🛑 [Interval-Based] تم إيقاف الفحص الدوري للمهمة ${docId}`);
+    } else if (watcher.type === 'listener') {
+      watcher.rtdbRef.off('value', watcher.callback);
+      console.log(`🛑 [Event-Based] تم إيقاف مراقبة المهمة ${docId}`);
+    }
+  } finally {
+    automationWatchers.delete(docId);
+  }
+}
+
 function startAutomation(docId, data) {
   const actionType   = data?.action?.type;
   const title        = data?.action?.payload?.title || 'Notification';
   const text         = data?.action?.payload?.text  || '';
-
   const operator     = data?.condition?.operator;
-  const rtdbPath     = data?.condition?.path;     // مثال: "Amr/Hum" أو "Nomber"
-  const source       = data?.condition?.source;   // يجب أن يكون "firebase_rtdb"
+  const rtdbPath     = data?.condition?.path;
+  const source       = data?.condition?.source;
   const targetValue  = data?.condition?.value;
-
   const targetUid    = data?.target_uid || null;
   const targetEmail  = data?.target_email || null;
-
-  // حقلَي التكرار (اختياريين)
-  const repeatUnit   = data?.repeat_unit || null;   // 'seconds' | 'minutes' | 'hours'
-  const repeatValue  = data?.repeat_value || null;  // رقم التكرار
+  
+  // -- تعديل مهم هنا --
+  const repeatUnit   = data?.schedule?.unit || null;
+  const repeatValue  = data?.schedule?.interval || null;
   const intervalMs   = msFromRepeat(repeatUnit, repeatValue);
 
   // تحققات سريعة
-  if (actionType !== 'notification') {
-    console.log(`↩️ ${docId}: action.type ليس "notification" — تخطّي`);
+  if (actionType !== 'notification' || source !== 'firebase_rtdb' || !rtdbPath || !operator || typeof targetValue === 'undefined') {
+    console.log(`↩️ ${docId}: بيانات الأتمتة ناقصة — تخطّي`);
     return;
   }
-  if (source !== 'firebase_rtdb') {
-    console.log(`↩️ ${docId}: source ليس "firebase_rtdb" — تخطّي`);
-    return;
-  }
-  if (!rtdbPath || !operator || typeof targetValue === 'undefined') {
-    console.log(`↩️ ${docId}: حقول condition ناقصة — تخطّي`);
-    return;
-  }
-
+  
   // لا تكرر تشغيل نفس الأتمتة
   if (automationWatchers.has(docId)) {
     stopAutomation(docId);
   }
 
-  let lastTriggered = 0; // آخر مرة أرسل فيها إشعار لهذه الأتمتة
-
-  const ref = rtdb.ref(rtdbPath);
-  const callback = async (snap) => {
-    const current = snap.val();
-    const now = Date.now();
-
-    if (evaluateCondition(current, operator, targetValue)) {
-      // لو ما فيه تكرار محدد → أرسل كل مرة يتحقق الشرط
-      // لو فيه تكرار → لا ترسل إلا بعد مرور الفترة
-      if (!intervalMs || now - lastTriggered >= intervalMs) {
-        console.log(`🚨 تحقّق الشرط للمهمة ${docId} على ${rtdbPath}:`, current);
+  // إذا لم يكن هناك تكرار، استخدم المنطق القديم (المراقبة عند التغيير فقط)
+  if (!intervalMs) {
+    console.log(`📡 [Event-Based] بدأنا نراقب "${rtdbPath}" للمهمة ${docId}`);
+    const ref = rtdb.ref(rtdbPath);
+    const callback = async (snap) => {
+      const current = snap.val();
+      if (evaluateCondition(current, operator, targetValue)) {
+        console.log(`🚨 [Event-Based] تحقّق الشرط للمهمة ${docId} على ${rtdbPath}:`, current);
         const tokens = await getUserDeviceTokensByTarget({ targetUid, targetEmail });
         if (tokens.length > 0) {
           await sendToTokens(tokens, title, text);
-          lastTriggered = now;
+        }
+      }
+    };
+    ref.on('value', callback);
+    // خزّن المعلومات اللازمة للإيقاف لاحقًا
+    automationWatchers.set(docId, { type: 'listener', rtdbRef: ref, callback });
+    return;
+  }
+
+  // المنطق الجديد: إذا كان هناك تكرار، استخدم الفحص الدوري
+  console.log(`⏳ [Interval-Based] سنقوم بفحص "${rtdbPath}" كل ${repeatValue} ${repeatUnit} للمهمة ${docId}`);
+
+  const intervalId = setInterval(async () => {
+    try {
+      console.log(`🔎 [Interval-Based] جاري فحص ${docId}...`);
+      const snap = await rtdb.ref(rtdbPath).once('value');
+      const current = snap.val();
+
+      if (evaluateCondition(current, operator, targetValue)) {
+        console.log(`🚨 [Interval-Based] تحقّق الشرط للمهمة ${docId} على ${rtdbPath}:`, current);
+        const tokens = await getUserDeviceTokensByTarget({ targetUid, targetEmail });
+        if (tokens.length > 0) {
+          await sendToTokens(tokens, title, text);
         } else {
           console.warn(`⚠️ ${docId}: لا توجد device_tokens للمستخدم المستهدف.`);
         }
-      } else {
-        console.log(`⏳ ${docId}: الشرط تحقق لكن لم يمر وقت التكرار بعد (${repeatValue} ${repeatUnit}).`);
       }
+    } catch (e) {
+      console.error(`❌ خطأ أثناء الفحص الدوري للمهمة ${docId}:`, e.message);
     }
-  };
+  }, intervalMs);
 
-  ref.on('value', callback);
-  automationWatchers.set(docId, { rtdbRef: ref, callback, lastTriggered });
-  console.log(`📡 بدأنا نراقب "${rtdbPath}" للمهمة ${docId}${intervalMs ? ` — تكرار كل ${repeatValue} ${repeatUnit}` : ''}`);
+  // خزّن معرّف الـ interval لإيقافه لاحقًا
+  automationWatchers.set(docId, { type: 'interval', intervalId });
 }
+
 
 function setupAutomationListeners() {
   console.log('👂 نتابع مجموعة automations بالتحديث الفوري...');
