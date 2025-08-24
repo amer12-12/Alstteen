@@ -129,11 +129,20 @@ function startAutomation(docId, data) {
   const targetValue  = data?.condition?.value;
   const targetUid    = data?.target_uid || null;
   const targetEmail  = data?.target_email || null;
+<<<<<<< HEAD
   
   // -- تعديل مهم هنا --
   const repeatUnit   = data?.schedule?.unit || null;
   const repeatValue  = data?.schedule?.interval || null;
   const intervalMs   = msFromRepeat(repeatUnit, repeatValue);
+=======
+
+  // حقلَي التكرار (اختياريين)
+ // قراءة بيانات التكرار من داخل كائن schedule
+ const repeatUnit   = data?.schedule?.unit || null;
+ const repeatValue  = data?.schedule?.interval || null;
+ const intervalMs   = msFromRepeat(repeatUnit, repeatValue);
+>>>>>>> 689fc1ce3a617e9fcc6f43fdeedd01946d462190
 
   // تحققات سريعة
   if (actionType !== 'notification' || source !== 'firebase_rtdb' || !rtdbPath || !operator || typeof targetValue === 'undefined') {
