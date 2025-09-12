@@ -19,38 +19,27 @@ const rtdb = admin.database();
 
 
 // --- START: ESP32 HEARTBEAT WATCHDOG CODE ---
-// هذا هو الجزء الجديد لمراقبة حالة الجهاز
-
 const heartbeatRef = rtdb.ref('/heartbeat');
 const statusRef = rtdb.ref('/is_online');
 let lastHeartbeatValue = null;
-let watchdogIntervalId = null; //  متغير للاحتفاظ بمعرّف المهمة الدورية لإيقافها لاحقًا
+let watchdogIntervalId = null; 
 
-/**
- * دالة تبدأ عملية المراقبة لحالة الجهاز كل دقيقة
- */
 function startHeartbeatWatchdog() {
   console.log('💓 Heartbeat watchdog service started. Monitoring ESP32 status...');
-
-  // إيقاف أي مراقب قديم قد يكون يعمل لتجنب التكرار
   if (watchdogIntervalId) {
     clearInterval(watchdogIntervalId);
   }
 
-  // في أول مرة تشغيل للسيرفر، نقوم بفحص مبدئي
   let initialCheck = true;
-
   watchdogIntervalId = setInterval(async () => {
     try {
       const snapshot = await heartbeatRef.once('value');
       const currentHeartbeatValue = snapshot.val();
-
       console.log(`💓 [Watchdog] Checking... Current: ${currentHeartbeatValue}, Previous: ${lastHeartbeatValue}`);
 
       if (initialCheck) {
         lastHeartbeatValue = currentHeartbeatValue;
         initialCheck = false;
-        // عند بدء تشغيل السيرفر، نفترض أن الجهاز متصل إذا كانت هناك قيمة
         if (currentHeartbeatValue !== null) {
           await statusRef.set(true); 
           console.log('💓 [Watchdog] Initial check complete. Status set to Online.');
@@ -58,80 +47,195 @@ function startHeartbeatWatchdog() {
         return;
       }
       
-      // إذا لم تتغير القيمة خلال دقيقة، فالجهاز غير متصل
       if (currentHeartbeatValue === lastHeartbeatValue) {
         console.log('💓 [Watchdog] Value unchanged. Setting status to OFFLINE.');
         await statusRef.set(false);
       } else {
-        // إذا تغيرت القيمة، فالجهاز متصل
         console.log('💓 [Watchdog] Value changed. Setting status to ONLINE.');
         await statusRef.set(true);
       }
-
-      // تحديث القيمة السابقة للمقارنة في المرة القادمة
       lastHeartbeatValue = currentHeartbeatValue;
-
     } catch (error) {
       console.error("❌ [Watchdog] Error:", error);
-      await statusRef.set(false); // عند حدوث خطأ، الأمان يقتضي اعتبار الجهاز غير متصل
+      await statusRef.set(false);
     }
-  }, 60000); // 60000 مللي ثانية = 1 دقيقة
+  }, 60000); 
 }
-
 // --- END: ESP32 HEARTBEAT WATCHDOG CODE ---
 
 
-// ---------- Helpers ----------
-// (كل الدوال المساعدة هنا تبقى كما هي بدون تغيير)
+// ---------- Helpers (from your working code) ----------
 function evaluateCondition(value, operator, target) {
-  // ... no changes here ...
+  switch (operator) {
+    case '==': return value == target;
+    case '!=': return value != target;
+    case '>':  return value > target;
+    case '<':  return value < target;
+    case '>=': return value >= target;
+    case '<=': return value <= target;
+    default:   return false;
+  }
 }
+
 async function sendToTokens(tokens, title, body) {
-  // ... no changes here ...
+  for (const token of tokens) {
+    try {
+      await admin.messaging().send({
+        token,
+        notification: { title, body },
+      });
+      console.log(`✅ إشعار أُرسل إلى: ${token}`);
+    } catch (err) {
+      console.error(`❌ فشل إرسال الإشعار إلى ${token}: ${err.message}`);
+    }
+  }
 }
+
 async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
-  // ... no changes here ...
+  try {
+    let userDocSnap = null;
+    if (targetUid) {
+      userDocSnap = await db.collection('users').doc(targetUid).get();
+    } else if (targetEmail) {
+      const q = await db.collection('users').where('email', '==', targetEmail).limit(1).get();
+      if (!q.empty) userDocSnap = q.docs[0];
+    }
+    if (!userDocSnap || !userDocSnap.exists) {
+        console.warn(`⚠️ لم يتم العثور على مستخدم`);
+        return [];
+    }
+    const tokens = userDocSnap.data().device_tokens || [];
+    return Array.isArray(tokens) ? tokens : [];
+  } catch (e) {
+    console.error('❌ خطأ في جلب device_tokens:', e.message);
+    return [];
+  }
 }
 
 
-// ---------- إدارة الليسنرز لكل Automation ----------
-// (كل هذا الجزء يبقى كما هو بدون تغيير)
+// ---------- Automation Listeners Management (from your working code) ----------
 const automationWatchers = new Map();
+
 function msFromRepeat(repeatUnit, repeatValue) {
-  // ... no changes here ...
+  if (!repeatUnit || !repeatValue) return 0;
+  const n = Number(repeatValue);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  switch (repeatUnit) {
+    case 'seconds': return n * 1000;
+    case 'minutes': return n * 60 * 1000;
+    case 'hours':   return n * 60 * 60 * 1000;
+    default:        return 0;
+  }
 }
+
 function stopAutomation(docId) {
-  // ... no changes here ...
+  const watcher = automationWatchers.get(docId);
+  if (!watcher) return;
+  try {
+    if (watcher.type === 'interval') {
+      clearInterval(watcher.intervalId);
+      console.log(`🛑 [Interval-Based] تم إيقاف الفحص الدوري للمهمة ${docId}`);
+    } else if (watcher.type === 'listener') {
+      watcher.rtdbRef.off('value', watcher.callback);
+      console.log(`🛑 [Event-Based] تم إيقاف مراقبة المهمة ${docId}`);
+    }
+  } finally {
+    automationWatchers.delete(docId);
+  }
 }
+
 function startAutomation(docId, data) {
-  // ... no changes here ...
+  const { action, condition, target_uid, target_email, schedule } = data;
+  if (action?.type !== 'notification' || condition?.source !== 'firebase_rtdb' || !condition?.path || !condition?.operator || typeof condition?.value === 'undefined') {
+    console.log(`↩️ ${docId}: بيانات الأتمتة ناقصة — تخطّي`);
+    return;
+  }
+  if (automationWatchers.has(docId)) {
+    stopAutomation(docId);
+  }
+  const intervalMs = msFromRepeat(schedule?.unit, schedule?.interval);
+
+  if (!intervalMs) {
+    console.log(`📡 [Event-Based] بدأنا نراقب "${condition.path}" للمهمة ${docId}`);
+    const ref = rtdb.ref(condition.path);
+    const callback = async (snap) => {
+      const current = snap.val();
+      if (evaluateCondition(current, condition.operator, condition.value)) {
+        console.log(`🚨 [Event-Based] تحقّق الشرط للمهمة ${docId}`);
+        const tokens = await getUserDeviceTokensByTarget({ targetUid: target_uid, targetEmail: target_email });
+        if (tokens.length > 0) {
+          await sendToTokens(tokens, action.payload.title, action.payload.text);
+        }
+      }
+    };
+    ref.on('value', callback);
+    automationWatchers.set(docId, { type: 'listener', rtdbRef: ref, callback });
+  } else {
+    console.log(`⏳ [Interval-Based] سنقوم بفحص "${condition.path}" كل ${schedule.interval} ${schedule.unit} للمهمة ${docId}`);
+    const intervalId = setInterval(async () => {
+      try {
+        const snap = await rtdb.ref(condition.path).once('value');
+        const current = snap.val();
+        if (evaluateCondition(current, condition.operator, condition.value)) {
+          console.log(`🚨 [Interval-Based] تحقّق الشرط للمهمة ${docId}`);
+          const tokens = await getUserDeviceTokensByTarget({ targetUid: target_uid, targetEmail: target_email });
+          if (tokens.length > 0) {
+            await sendToTokens(tokens, action.payload.title, action.payload.text);
+          }
+        }
+      } catch (e) {
+        console.error(`❌ خطأ أثناء الفحص الدوري للمهمة ${docId}:`, e.message);
+      }
+    }, intervalMs);
+    automationWatchers.set(docId, { type: 'interval', intervalId });
+  }
 }
+
 function setupAutomationListeners() {
-  // ... no changes here ...
+  console.log('👂 نتابع مجموعة automations بالتحديث الفوري...');
+  return db.collection('automations').onSnapshot(
+    (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === 'added' || change.type === 'modified') {
+          startAutomation(change.doc.id, change.doc.data());
+        } else if (change.type === 'removed') {
+          stopAutomation(change.doc.id);
+        }
+      });
+    },
+    (err) => console.error('❌ Firestore onSnapshot error:', err.message)
+  );
 }
 
 
 // ---------- Health/Test endpoints ----------
-// (كل هذا الجزء يبقى كما هو بدون تغيير)
 app.get('/check-firestore', async (_req, res) => {
-  // ... no changes here ...
+    try {
+        const snapshot = await db.collection('automations').get();
+        res.json({ count: snapshot.size });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get('/check-rtdb', async (_req, res) => {
-  // ... no changes here ...
+    try {
+        const snapshot = await rtdb.ref('/heartbeat').once('value');
+        res.json({ value: snapshot.val() });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
+
 
 // ---------- Graceful shutdown ----------
 process.on('SIGTERM', () => {
   console.log('♻️ Shutting down… إيقاف جميع الليسنرز');
   
-  // --- START: ADDITION TO SHUTDOWN ---
-  // إضافة إيقاف مراقب نبض القلب عند إغلاق السيرفر
   if (watchdogIntervalId) {
     clearInterval(watchdogIntervalId);
     console.log('💓 [Watchdog] Heartbeat watchdog stopped.');
   }
-  // --- END: ADDITION TO SHUTDOWN ---
 
   for (const docId of automationWatchers.keys()) {
     stopAutomation(docId);
@@ -139,16 +243,15 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
+
 // ---------- Start server ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running at http://localhost:${PORT}`);
   
-  // تشغيل مراقب المهام الآلية الموجود لديك
+  // تشغيل مراقب المهام الآلية
   setupAutomationListeners();
 
-  // --- START: STARTING THE WATCHDOG ---
-  // تشغيل مراقب نبض القلب الجديد عند بدء تشغيل السيرفر
+  // تشغيل مراقب نبض القلب
   startHeartbeatWatchdog();
-  // --- END: STARTING THE WATCHDOG ---
 });
