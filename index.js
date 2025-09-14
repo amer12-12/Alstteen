@@ -1,4 +1,4 @@
-// index.js
+// index.js (الكود الكامل بعد التعديل)
 
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -64,7 +64,7 @@ function startHeartbeatWatchdog() {
 // --- END: ESP32 HEARTBEAT WATCHDOG CODE ---
 
 
-// ---------- Helpers (from your working code) ----------
+// ---------- Helpers ----------
 function evaluateCondition(value, operator, target) {
   switch (operator) {
     case '==': return value == target;
@@ -113,7 +113,7 @@ async function getUserDeviceTokensByTarget({ targetUid, targetEmail }) {
 }
 
 
-// ---------- Automation Listeners Management (from your working code) ----------
+// ---------- Automation Listeners Management ----------
 const automationWatchers = new Map();
 
 function msFromRepeat(repeatUnit, repeatValue) {
@@ -191,21 +191,30 @@ function startAutomation(docId, data) {
   }
 }
 
+// ========== START: الكود الذي تم تعديله ==========
 function setupAutomationListeners() {
   console.log('👂 نتابع مجموعة automations بالتحديث الفوري...');
   return db.collection('automations').onSnapshot(
     (snapshot) => {
       snapshot.docChanges().forEach((change) => {
-        if (change.type === 'added' || change.type === 'modified') {
-          startAutomation(change.doc.id, change.doc.data());
+        const docId = change.doc.id;
+        const data = change.doc.data();
+
+        if (change.type === 'added') {
+          startAutomation(docId, data);
+        } else if (change.type === 'modified') {
+          // تمت إضافة هذه الرسالة لجعل السلوك مطابق للكود الأول
+          console.log(`✏️ تم تعديل الأتمتة ${docId} — إعادة تشغيل الليسنر`);
+          startAutomation(docId, data);
         } else if (change.type === 'removed') {
-          stopAutomation(change.doc.id);
+          stopAutomation(docId);
         }
       });
     },
     (err) => console.error('❌ Firestore onSnapshot error:', err.message)
   );
 }
+// ========== END: الكود الذي تم تعديله ==========
 
 
 // ---------- Health/Test endpoints ----------
@@ -247,6 +256,7 @@ process.on('SIGTERM', () => {
 // ---------- Start server ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
+  console.log(`✅ Server running at http://localhost:${PORT}`);
   console.log(`✅ Server running at http://localhost:${PORT}`);
   
   // تشغيل مراقب المهام الآلية
